@@ -3,9 +3,9 @@
 This repo contains contracts for the Shipyard project. Here's a brief overview of the architecture to help you understand how it's setup:
 
 We have 3 different contracts (listed in the order they are called):
-1) OneClick (proof of concept was deployed here: https://arbiscan.io/address/0xE644A77b050DE45233716Db3aF2E2f0CC56206B8#code)
-2) Vault (proof of concept was deployed here: https://arbiscan.io/address/0x573f5Bc50733D648261Aea56e1c530D8b1C0C408#code)
-3) Strategy (proof of concept was deployed here: https://arbiscan.io/address/0xe1ca57D084ce6A810f2b2cF964Db0D691cAABAE5#code)
+1) ShipyardOneClickCurve (proof of concept was deployed here: https://arbiscan.io/address/0xE644A77b050DE45233716Db3aF2E2f0CC56206B8#code)
+2) ShipyardVault (proof of concept was deployed here: https://arbiscan.io/address/0x573f5Bc50733D648261Aea56e1c530D8b1C0C408#code)
+3) StrategyCurveLP (proof of concept was deployed here: https://arbiscan.io/address/0xe1ca57D084ce6A810f2b2cF964Db0D691cAABAE5#code)
 
 <br />
 

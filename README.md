@@ -27,4 +27,4 @@ This is the contract that controls the ERC-20 token ('ship' token) issued.
 
 This is where the meat of the logic resides. It is responsible for handling the actual deposit/withdraw interaction logic as well as "harvest" which is the term for when we claim rewards and auto-compound them.
 
-The included strategy is Curve-specific.
+The included strategy is Curve-specific. In the included vault case, we're interacting with this Curve pool: https://arbitrum.curve.fi/2pool/deposit.

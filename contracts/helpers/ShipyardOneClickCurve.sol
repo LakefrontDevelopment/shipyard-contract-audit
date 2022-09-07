@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.6.12;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
-import "../interfaces/company/IShipyardVault.sol";
 import "../interfaces/common/IUniswapRouterETH.sol";
+import "../interfaces/company/IShipyardVault.sol";
+import "../interfaces/company/IStrategyCurve.sol";
 import "../interfaces/curve/ICurveSwap.sol";
+import "../libraries/SafeCurveSwap.sol";
+import "../libraries/SafeUniswapRouter.sol";
+import "../managers/SlippageManager.sol";
 
-import "../utils/GasThrottler.sol";
-
-contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
+contract ShipyardOneClickCurve is Ownable, SlippageManager, ReentrancyGuard {
 
     using SafeERC20 for IERC20;
     using SafeERC20 for IShipyardVault;
     using SafeMath for uint256;
+    using SafeCurveSwap for ICurveSwap;
+    using SafeUniswapRouter for IUniswapRouterETH;
 
-    address usdcAddress;
+    address public immutable usdcAddress;
 
     constructor(
         address _usdcAddress
@@ -30,7 +34,7 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
     function deposit(address _shipyardVaultAddress, address _depositTokenAddress, uint256 _amountInDepositToken) external nonReentrant {
 
         IShipyardVault shipyardVault = IShipyardVault(_shipyardVaultAddress);
-        IStrategy strategy = shipyardVault.strategy();
+        IStrategyCurve strategy = IStrategyCurve(shipyardVault.strategy());
 
         address poolTokenAddress = (address)(strategy.want());
 
@@ -58,11 +62,14 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
 
             _approveTokenIfNeeded(usdcAddress, unirouterAddress);
 
-            IUniswapRouterETH(unirouterAddress).swapExactTokensForTokens(_amountInDepositToken, 0, paths, address(this), block.timestamp);
+            _amountInDepositToken = IERC20(_depositTokenAddress).balanceOf(address(this));
 
-            _amountInDepositToken = IERC20(preferredTokenAddress).balanceOf(address(this));
+            IUniswapRouterETH(unirouterAddress).safeSwapExactTokensForTokens(slippage, _amountInDepositToken, paths, address(this), block.timestamp);
+
             _depositTokenAddress = preferredTokenAddress;
         }
+
+        _amountInDepositToken = IERC20(_depositTokenAddress).balanceOf(address(this));
 
         address poolAddress = strategy.pool();
 
@@ -76,22 +83,22 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
             if (poolSize == 2) {
                 uint256[2] memory amounts;
                 amounts[depositTokenIndex] = _amountInDepositToken;
-                ICurveSwap(poolAddress).add_liquidity(amounts, 0);
+                ICurveSwap(poolAddress).safeAddLiquidity(slippage, amounts);
 
             } else if (poolSize == 3) {
                 uint256[3] memory amounts;
                 amounts[depositTokenIndex] = _amountInDepositToken;
-                ICurveSwap(poolAddress).add_liquidity(amounts, 0);
+                ICurveSwap(poolAddress).safeAddLiquidity(slippage, amounts);
 
             } else if (poolSize == 4) {
                 uint256[4] memory amounts;
                 amounts[depositTokenIndex] = _amountInDepositToken;
-                ICurveSwap(poolAddress).add_liquidity(amounts, 0);
+                ICurveSwap(poolAddress).safeAddLiquidity(slippage, amounts);
 
             } else if (poolSize == 5) {
                 uint256[5] memory amounts;
                 amounts[depositTokenIndex] = _amountInDepositToken;
-                ICurveSwap(poolAddress).add_liquidity(amounts, 0);
+                ICurveSwap(poolAddress).safeAddLiquidity(slippage, amounts);
             }
         }
 
@@ -113,7 +120,7 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
     function withdraw(address _shipyardVaultAddress, address _requestedTokenAddress, uint256 _withdrawAmountInShipToken) external nonReentrant {
 
         IShipyardVault shipyardVault = IShipyardVault(_shipyardVaultAddress);
-        IStrategy strategy = shipyardVault.strategy();
+        IStrategyCurve strategy = IStrategyCurve(shipyardVault.strategy());
 
         bool isUnderlyingToken = strategy.underlyingToken(_requestedTokenAddress);
 
@@ -122,6 +129,8 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
         require(isUnderlyingToken || _requestedTokenAddress == poolTokenAddress || _requestedTokenAddress == usdcAddress, 'Invalid withdraw token address');
 
         shipyardVault.safeTransferFrom(msg.sender, address(this), _withdrawAmountInShipToken);
+
+        _withdrawAmountInShipToken = shipyardVault.balanceOf(address(this));
 
         shipyardVault.withdraw(_withdrawAmountInShipToken);
 
@@ -139,10 +148,10 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
 
         if (isUnderlyingToken) {
 
-            ICurveSwap(poolAddress).remove_liquidity_one_coin(
+            ICurveSwap(poolAddress).safeRemoveLiquidityOneCoin(
+                slippage,
                 poolTokenBalance,
-                int128(strategy.underlyingTokenIndex(_requestedTokenAddress)),
-                0
+                int128(strategy.underlyingTokenIndex(_requestedTokenAddress))
             );
 
             uint256 outputTokenBalance = IERC20(_requestedTokenAddress).balanceOf(address(this));
@@ -155,10 +164,10 @@ contract ShipyardOneClickCurve is Ownable, ReentrancyGuard, GasThrottler {
 
         address preferredTokenAddress = strategy.preferredUnderlyingToken();
 
-        ICurveSwap(poolAddress).remove_liquidity_one_coin(
+        ICurveSwap(poolAddress).safeRemoveLiquidityOneCoin(
+            slippage,
             poolTokenBalance,
-            int128(strategy.underlyingTokenIndex(preferredTokenAddress)),
-            0
+            int128(strategy.underlyingTokenIndex(preferredTokenAddress))
         );
 
         // Swap from preferredToken to USDC

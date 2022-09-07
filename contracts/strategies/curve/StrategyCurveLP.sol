@@ -1,23 +1,29 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.6.12;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "../../interfaces/common/IUniswapRouterETH.sol";
 import "../../interfaces/common/IWrappedNative.sol";
 import "../../interfaces/curve/ICurveSwap.sol";
 import "../../interfaces/curve/IGaugeFactory.sol";
 import "../../interfaces/curve/IRewardsGauge.sol";
-import "../common/StratManager.sol";
-import "../common/FeeManager.sol";
-import "../../utils/GasThrottler.sol";
+import "../../libraries/SafeCurveSwap.sol";
+import "../../libraries/SafeUniswapRouter.sol";
+import "../../managers/FeeManager.sol";
+import "../../managers/SlippageManager.sol";
+import "../../managers/StratManager.sol";
+import "../../utils/AddressUtils.sol";
 
-contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
+contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeMath for uint256;
+    using SafeCurveSwap for ICurveSwap;
+    using SafeUniswapRouter for IUniswapRouterETH;
 
     // Tokens used
     address public want; // Curve LP token
@@ -26,14 +32,17 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
     address public preferredUnderlyingToken;
 
     // Third party contracts
-    address public gaugeFactory;
+    address public immutable gaugeFactory;
     address public rewardsGauge;
     address public pool;
 
     uint public poolSize;
-    uint public preferredUnderlyingTokenIndex;
-    bool public useUnderlying;
-    bool public useMetapool;
+    uint public immutable preferredUnderlyingTokenIndex;
+
+    bool public immutable useUnderlying;
+    bool public immutable useMetapool;
+    // If preferredUnderlyingToken should be sent as unwrapped native.
+    bool public immutable depositNative;
 
     // Routes
     address[] public crvToNativeRoute;
@@ -46,13 +55,6 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
     }
 
     Reward[] public rewards;
-
-    // If no CRV rewards yet, can enable later with custom router.
-    bool public crvEnabled = true;
-    address public crvRouter;
-
-    // If preferredUnderlyingToken should be sent as unwrapped native.
-    bool public depositNative;
 
     bool public harvestOnDeposit = false;
     uint256 public lastHarvest;
@@ -71,33 +73,36 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         address _gauge,
         address _pool,
         uint _poolSize,
-        bool[] memory _useUnderlyingOrMetapool,
+        bool[] memory _liquidityOptions,
         address[] memory _crvToNativeRoute,
         address[] memory _nativeToPreferredUnderlyingTokenRoute,
         address _vault,
         address _unirouter,
-        address _keeper,
         address _strategist,
         address _companyFeeRecipient,
         address _preferredUnderlyingToken
-    ) StratManager(_keeper, _strategist, _unirouter, _vault, _companyFeeRecipient) public {
-        want = _want;
-        gaugeFactory = _gaugeFactory;
-        rewardsGauge = _gauge;
-        pool = _pool;
+    ) StratManager(_strategist, _unirouter, _vault, _companyFeeRecipient) public {
+        want = AddressUtils.validateOneAndReturn(_want);
+        gaugeFactory = AddressUtils.validateOneAndReturn(_gaugeFactory);
+        rewardsGauge = AddressUtils.validateOneAndReturn(_gauge);
+        pool = AddressUtils.validateOneAndReturn(_pool);
         poolSize = _poolSize;
-        useUnderlying = _useUnderlyingOrMetapool[0];
-        useMetapool = _useUnderlyingOrMetapool[1];
+
+        useUnderlying = _liquidityOptions[0];
+        useMetapool = _liquidityOptions[1];
+        depositNative = _liquidityOptions[2];
+
+        AddressUtils.validateMany(_crvToNativeRoute);
+        AddressUtils.validateMany(_nativeToPreferredUnderlyingTokenRoute);
 
         crv = _crvToNativeRoute[0];
         native = _crvToNativeRoute[_crvToNativeRoute.length - 1];
         crvToNativeRoute = _crvToNativeRoute;
-        crvRouter = unirouter;
 
         require(_nativeToPreferredUnderlyingTokenRoute[0] == native, '_nativeToPreferredUnderlyingTokenRoute[0] != native');
         nativeToPreferredUnderlyingTokenRoute = _nativeToPreferredUnderlyingTokenRoute;
 
-        preferredUnderlyingToken = _preferredUnderlyingToken;
+        preferredUnderlyingToken = AddressUtils.validateOneAndReturn(_preferredUnderlyingToken);
 
         for (uint256 index = 0; index < poolSize; index++) {
             address tokenAddress = ICurveSwap(pool).coins(index);
@@ -110,7 +115,7 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         _giveAllowances();
     }
 
-    function deposit() public whenNotPaused {
+    function deposit() public whenNotPaused nonReentrant {
         uint256 wantBal = IERC20(want).balanceOf(address(this));
 
         if (wantBal > 0) {
@@ -119,7 +124,7 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         }
     }
 
-    function withdraw(uint256 _amount) external {
+    function withdraw(uint256 _amount) external nonReentrant {
         require(msg.sender == vault, "!vault");
 
         if (tx.origin != owner() && !paused()) {
@@ -140,108 +145,25 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
     function beforeDeposit() external override {
         if (harvestOnDeposit) {
             require(msg.sender == vault, "!vault");
-            _harvest();
+            harvest();
         }
     }
 
-    function harvest() external virtual whenNotPaused gasThrottle {
-        _harvest();
-    }
-
-    function managerHarvest() external onlyManager {
-        _harvest();
-    }
-
     // Compounds earnings and charges fees.
-    function _harvest() internal {
+    function harvest() public whenNotPaused {
         if (gaugeFactory != address(0)) {
             IGaugeFactory(gaugeFactory).mint(rewardsGauge);
         }
         IRewardsGauge(rewardsGauge).claim_rewards(address(this));
-        swapRewardsToNative();
+        _swapRewardsToNative();
         uint256 nativeBal = IERC20(native).balanceOf(address(this));
         if (nativeBal > 0) {
-            chargeFees();
-            addLiquidity();
+            _chargeFees();
+            _addLiquidity();
             uint256 wantHarvested = balanceOfWant();
             deposit();
             lastHarvest = block.timestamp;
             emit Harvest(msg.sender, wantHarvested, balanceOf());
-        }
-    }
-
-    function swapRewardsToNative() internal {
-        uint256 crvBal = IERC20(crv).balanceOf(address(this));
-        if (crvEnabled && crvBal > 0) {
-            IUniswapRouterETH(crvRouter).swapExactTokensForTokens(crvBal, 0, crvToNativeRoute, address(this), block.timestamp);
-        }
-
-        for (uint i; i < rewards.length; i++) {
-            uint bal = IERC20(rewards[i].token).balanceOf(address(this));
-            if (bal >= rewards[i].minAmount) {
-                IUniswapRouterETH(unirouter).swapExactTokensForTokens(bal, 0, rewards[i].toNativeRoute, address(this), block.timestamp);
-            }
-        }
-    }
-
-    // Charge harvest call, strategy, and performance fees from profits earned.
-    function chargeFees() internal {
-        uint256 nativeBal = IERC20(native).balanceOf(address(this));
-
-        uint256 harvestCallFeeAmount;
-        if (harvestCallFee > 0) {
-            harvestCallFeeAmount = nativeBal.mul(harvestCallFee).div(FEE_DENOMINATOR);
-            IERC20(native).safeTransfer(tx.origin, harvestCallFeeAmount);
-        }
-
-        uint256 strategistFeeAmount;
-        if (strategistFee > 0 && strategist != address(0)) {
-            strategistFeeAmount = nativeBal.mul(strategistFee).div(FEE_DENOMINATOR);
-            IERC20(native).safeTransfer(strategist, strategistFeeAmount);
-        }
-
-        uint256 performanceFeeAmount = nativeBal.mul(performanceFee).div(FEE_DENOMINATOR);
-        IERC20(native).safeTransfer(companyFeeRecipient, performanceFeeAmount);
-
-        emit ChargeFees(harvestCallFeeAmount, strategistFeeAmount, performanceFeeAmount);
-    }
-
-    // Adds liquidity to AMM and gets more LP tokens.
-    function addLiquidity() internal {
-        uint256 preferredUnderlyingBal;
-        uint256 depositNativeAmount;
-        uint256 nativeBal = IERC20(native).balanceOf(address(this));
-        if (preferredUnderlyingToken != native) {
-            IUniswapRouterETH(unirouter).swapExactTokensForTokens(nativeBal, 0, nativeToPreferredUnderlyingTokenRoute, address(this), block.timestamp);
-            preferredUnderlyingBal = IERC20(preferredUnderlyingToken).balanceOf(address(this));
-        } else {
-            preferredUnderlyingBal = nativeBal;
-            if (depositNative) {
-                depositNativeAmount = nativeBal;
-                IWrappedNative(native).withdraw(depositNativeAmount);
-            }
-        }
-
-        if (poolSize == 2) {
-            uint256[2] memory amounts;
-            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
-            if (useUnderlying) ICurveSwap(pool).add_liquidity(amounts, 0, true);
-            else ICurveSwap(pool).add_liquidity{value : depositNativeAmount}(amounts, 0);
-        } else if (poolSize == 3) {
-            uint256[3] memory amounts;
-            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
-            if (useUnderlying) ICurveSwap(pool).add_liquidity(amounts, 0, true);
-            else if (useMetapool) ICurveSwap(pool).add_liquidity(want, amounts, 0);
-            else ICurveSwap(pool).add_liquidity(amounts, 0);
-        } else if (poolSize == 4) {
-            uint256[4] memory amounts;
-            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
-            if (useMetapool) ICurveSwap(pool).add_liquidity(want, amounts, 0);
-            else ICurveSwap(pool).add_liquidity(amounts, 0);
-        } else if (poolSize == 5) {
-            uint256[5] memory amounts;
-            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
-            ICurveSwap(pool).add_liquidity(amounts, 0);
         }
     }
 
@@ -255,11 +177,11 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         IERC20(token).safeApprove(unirouter, type(uint).max);
     }
 
-    function resetRewardTokens() external onlyManager {
+    function resetRewardTokens() external onlyOwner {
         delete rewards;
     }
 
-    // Calculates the total underlaying 'want' held by the strat.
+    // Calculates the total underlying 'want' held by the strat.
     function balanceOf() public view returns (uint256) {
         return balanceOfWant().add(balanceOfPool());
     }
@@ -294,25 +216,14 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         return rewards.length;
     }
 
-    function setCrvEnabled(bool _enabled) external onlyManager {
-        crvEnabled = _enabled;
-    }
-
-    function setCrvRoute(address _router, address[] memory _crvToNative) external onlyManager {
+    function setCrvRoute(address[] memory _crvToNative) external onlyOwner {
         require(_crvToNative[0] == crv, '!crv');
         require(_crvToNative[_crvToNative.length - 1] == native, '!native');
 
-        _removeAllowances();
         crvToNativeRoute = _crvToNative;
-        crvRouter = _router;
-        _giveAllowances();
     }
 
-    function setDepositNative(bool _depositNative) external onlyOwner {
-        depositNative = _depositNative;
-    }
-
-    function setHarvestOnDeposit(bool _harvestOnDeposit) external onlyManager {
+    function setHarvestOnDeposit(bool _harvestOnDeposit) external onlyOwner {
         harvestOnDeposit = _harvestOnDeposit;
     }
 
@@ -322,7 +233,7 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
     }
 
     // Current native reward amount for calling harvest.
-    function callReward() public view returns (uint256) {
+    function callReward() external view returns (uint256) {
         uint256 outputBal = rewardsAvailable();
         uint256[] memory amountOut = IUniswapRouterETH(unirouter).getAmountsOut(outputBal, crvToNativeRoute);
         uint256 nativeOut = amountOut[amountOut.length - 1];
@@ -330,23 +241,19 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         return nativeOut.mul(harvestCallFee).div(FEE_DENOMINATOR);
     }
 
-    function setShouldGasThrottle(bool _shouldGasThrottle) external onlyManager {
-        shouldGasThrottle = _shouldGasThrottle;
-    }
-
     // Pauses deposits and withdraws all funds from third party systems.
-    function panic() public onlyManager {
+    function panic() external onlyOwner {
         pause();
         IRewardsGauge(rewardsGauge).withdraw(balanceOfPool());
     }
 
-    function pause() public onlyManager {
+    function pause() public onlyOwner {
         _pause();
 
         _removeAllowances();
     }
 
-    function unpause() external onlyManager {
+    function unpause() external onlyOwner {
         _unpause();
 
         _giveAllowances();
@@ -354,31 +261,106 @@ contract StrategyCurveLP is StratManager, FeeManager, GasThrottler {
         deposit();
     }
 
+    function coins(uint256 _index) external view returns (address){
+        return ICurveSwap(pool).coins(_index);
+    }
+
+    function underlyingToken(address _tokenAddress) external view returns (bool){
+        return underlyingTokenAndFlag[_tokenAddress];
+    }
+
+    function underlyingTokenIndex(address _tokenAddress) external view returns (uint256){
+        return underlyingTokenAndIndex[_tokenAddress];
+    }
+
+    receive() external payable {}
+
+    function _swapRewardsToNative() internal {
+        uint256 crvBal = IERC20(crv).balanceOf(address(this));
+        if (crvBal > 0) {
+            IUniswapRouterETH(unirouter).safeSwapExactTokensForTokens(slippage, crvBal, crvToNativeRoute, address(this), block.timestamp);
+        }
+
+        for (uint i; i < rewards.length; i++) {
+            uint bal = IERC20(rewards[i].token).balanceOf(address(this));
+            if (bal >= rewards[i].minAmount) {
+                IUniswapRouterETH(unirouter).safeSwapExactTokensForTokens(slippage, bal, rewards[i].toNativeRoute, address(this), block.timestamp);
+            }
+        }
+    }
+
+    // Charge harvest call, strategy, and performance fees from profits earned.
+    function _chargeFees() internal {
+        uint256 nativeBal = IERC20(native).balanceOf(address(this));
+
+        uint256 harvestCallFeeAmount;
+        if (harvestCallFee > 0) {
+            harvestCallFeeAmount = nativeBal.mul(harvestCallFee).div(FEE_DENOMINATOR);
+            IERC20(native).safeTransfer(tx.origin, harvestCallFeeAmount);
+        }
+
+        uint256 strategistFeeAmount;
+        if (strategistFee > 0 && strategist != address(0)) {
+            strategistFeeAmount = nativeBal.mul(strategistFee).div(FEE_DENOMINATOR);
+            IERC20(native).safeTransfer(strategist, strategistFeeAmount);
+        }
+
+        uint256 performanceFeeAmount = nativeBal.mul(performanceFee).div(FEE_DENOMINATOR);
+        IERC20(native).safeTransfer(companyFeeRecipient, performanceFeeAmount);
+
+        emit ChargeFees(harvestCallFeeAmount, strategistFeeAmount, performanceFeeAmount);
+    }
+
+    // Adds liquidity to AMM and gets more LP tokens.
+    function _addLiquidity() internal {
+        uint256 preferredUnderlyingBal;
+        uint256 depositNativeAmount;
+        uint256 nativeBal = IERC20(native).balanceOf(address(this));
+        if (preferredUnderlyingToken != native) {
+            IUniswapRouterETH(unirouter).safeSwapExactTokensForTokens(slippage, nativeBal, nativeToPreferredUnderlyingTokenRoute, address(this), block.timestamp);
+            preferredUnderlyingBal = IERC20(preferredUnderlyingToken).balanceOf(address(this));
+        } else {
+            preferredUnderlyingBal = nativeBal;
+            if (depositNative) {
+                depositNativeAmount = nativeBal;
+                IWrappedNative(native).withdraw(depositNativeAmount);
+            }
+        }
+
+        if (poolSize == 2) {
+            uint256[2] memory amounts;
+            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
+            if (useUnderlying) ICurveSwap(pool).safeAddLiquidity(slippage, amounts, true);
+            else ICurveSwap(pool).safeAddLiquidity(slippage, amounts, depositNativeAmount);
+        } else if (poolSize == 3) {
+            uint256[3] memory amounts;
+            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
+            if (useUnderlying) ICurveSwap(pool).safeAddLiquidity(slippage, amounts, true);
+            else if (useMetapool) ICurveSwap(pool).safeAddLiquidity(slippage, want, amounts);
+            else ICurveSwap(pool).safeAddLiquidity(slippage, amounts);
+        } else if (poolSize == 4) {
+            uint256[4] memory amounts;
+            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
+            if (useMetapool) ICurveSwap(pool).safeAddLiquidity(slippage, want, amounts);
+            else ICurveSwap(pool).safeAddLiquidity(slippage, amounts);
+        } else if (poolSize == 5) {
+            uint256[5] memory amounts;
+            amounts[preferredUnderlyingTokenIndex] = preferredUnderlyingBal;
+            ICurveSwap(pool).safeAddLiquidity(slippage, amounts);
+        }
+    }
+
     function _giveAllowances() internal {
         IERC20(want).safeApprove(rewardsGauge, type(uint).max);
         IERC20(native).safeApprove(unirouter, type(uint).max);
-        IERC20(crv).safeApprove(crvRouter, type(uint).max);
+        IERC20(crv).safeApprove(unirouter, type(uint).max);
         IERC20(preferredUnderlyingToken).safeApprove(pool, type(uint).max);
     }
 
     function _removeAllowances() internal {
         IERC20(want).safeApprove(rewardsGauge, 0);
         IERC20(native).safeApprove(unirouter, 0);
-        IERC20(crv).safeApprove(crvRouter, 0);
+        IERC20(crv).safeApprove(unirouter, 0);
         IERC20(preferredUnderlyingToken).safeApprove(pool, 0);
     }
-
-    function coins(uint256 _index) external view returns (address){
-        return ICurveSwap(pool).coins(_index);
-    }
-
-    function underlyingToken(address _tokenAddress) public view returns (bool){
-        return underlyingTokenAndFlag[_tokenAddress];
-    }
-
-    function underlyingTokenIndex(address _tokenAddress) public view returns (uint256){
-        return underlyingTokenAndIndex[_tokenAddress];
-    }
-
-    receive() external payable {}
 }

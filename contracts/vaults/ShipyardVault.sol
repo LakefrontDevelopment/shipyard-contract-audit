@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-pragma solidity ^0.6.0;
+pragma solidity ^0.6.12;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
@@ -20,7 +20,7 @@ contract ShipyardVault is ERC20, Ownable, ReentrancyGuard {
     using SafeMath for uint256;
 
     // The strategy currently in use by the vault.
-    IStrategy public strategy;
+    IStrategy public immutable strategy;
 
     /**
      * @dev Sets the value of {token} to the token that the vault will
@@ -69,7 +69,7 @@ contract ShipyardVault is ERC20, Ownable, ReentrancyGuard {
      * @dev Function for various UIs to display the current value of one of our yield tokens.
      * Returns an uint256 with 18 decimals of how much underlying asset one vault share represents.
      */
-    function getPricePerFullShare() public view returns (uint256) {
+    function getPricePerFullShare() external view returns (uint256) {
         return totalSupply() == 0 ? 1e18 : balance().mul(1e18).div(totalSupply());
     }
 
@@ -123,7 +123,7 @@ contract ShipyardVault is ERC20, Ownable, ReentrancyGuard {
      * from the strategy and pay up the token holder. A proportional number of IOU
      * tokens are burned in the process.
      */
-    function withdraw(uint256 _shares) public {
+    function withdraw(uint256 _shares) public nonReentrant {
         uint256 r = (balance().mul(_shares)).div(totalSupply());
         _burn(msg.sender, _shares);
 

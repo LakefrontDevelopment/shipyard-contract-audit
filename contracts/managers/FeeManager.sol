@@ -18,27 +18,37 @@ abstract contract FeeManager is StratManager {
     uint public strategistFee = 0;
     uint public withdrawalFee = 5;
 
-    function setHarvestCallFee(uint256 _fee) public onlyManager {
+    event FeeUpdate(address indexed updater, string updateType, uint256 newValue);
+
+    function setHarvestCallFee(uint256 _fee) external onlyOwner {
         require(_fee <= MAX_HARVEST_CALL_FEE, "!cap");
 
         harvestCallFee = _fee;
+
+        emit FeeUpdate(msg.sender, "HarvestCallFee", _fee);
     }
 
-    function setPerformanceFee(uint256 _fee) public onlyManager {
+    function setPerformanceFee(uint256 _fee) external onlyOwner {
         require(_fee <= MAX_PERFORMANCE_FEE, "!cap");
 
         performanceFee = _fee;
+
+        emit FeeUpdate(msg.sender, "PerformanceFee", _fee);
     }
 
-    function setStrategistFee(uint256 _fee) public onlyManager {
+    function setStrategistFee(uint256 _fee) external onlyOwner {
         require(_fee <= MAX_STRATEGIST_FEE, "!cap");
 
         strategistFee = _fee;
+
+        emit FeeUpdate(msg.sender, "StrategistFee", _fee);
     }
 
-    function setWithdrawalFee(uint256 _fee) public onlyManager {
+    function setWithdrawalFee(uint256 _fee) public onlyOwner {
         require(_fee <= MAX_WITHDRAWAL_FEE, "!cap");
 
         withdrawalFee = _fee;
+
+        emit FeeUpdate(msg.sender, "WithdrawFee", _fee);
     }
 }

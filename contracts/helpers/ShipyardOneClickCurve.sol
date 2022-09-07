@@ -14,6 +14,7 @@ import "../interfaces/curve/ICurveSwap.sol";
 import "../libraries/SafeCurveSwap.sol";
 import "../libraries/SafeUniswapRouter.sol";
 import "../managers/SlippageManager.sol";
+import "../utils/AddressUtils.sol";
 
 contract ShipyardOneClickCurve is Ownable, SlippageManager, ReentrancyGuard {
 
@@ -28,7 +29,7 @@ contract ShipyardOneClickCurve is Ownable, SlippageManager, ReentrancyGuard {
     constructor(
         address _usdcAddress
     ) public {
-        usdcAddress = _usdcAddress;
+        usdcAddress = AddressUtils.validateOneAndReturn(_usdcAddress);
     }
 
     function deposit(address _shipyardVaultAddress, address _depositTokenAddress, uint256 _amountInDepositToken) external nonReentrant {

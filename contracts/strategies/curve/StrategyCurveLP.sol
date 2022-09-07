@@ -66,6 +66,7 @@ contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, Reentranc
     event Deposit(uint256 tvl);
     event Withdraw(uint256 tvl);
     event ChargeFees(uint256 harvestCallFeeAmount, uint256 strategistFeeAmount, uint256 performanceFeeAmount);
+    event OwnerOperation(address indexed invoker, string method);
 
     constructor(
         address _want,
@@ -175,10 +176,14 @@ contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, Reentranc
         rewards.push(Reward(token, _rewardToNativeRoute, _minAmount));
         IERC20(token).safeApprove(unirouter, 0);
         IERC20(token).safeApprove(unirouter, type(uint).max);
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.addRewardToken");
     }
 
     function resetRewardTokens() external onlyOwner {
         delete rewards;
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.resetRewardTokens");
     }
 
     // Calculates the total underlying 'want' held by the strat.
@@ -221,10 +226,14 @@ contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, Reentranc
         require(_crvToNative[_crvToNative.length - 1] == native, '!native');
 
         crvToNativeRoute = _crvToNative;
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.setCrvRoute");
     }
 
     function setHarvestOnDeposit(bool _harvestOnDeposit) external onlyOwner {
         harvestOnDeposit = _harvestOnDeposit;
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.setHarvestOnDeposit");
     }
 
     // Returns rewards claimable.
@@ -245,12 +254,16 @@ contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, Reentranc
     function panic() external onlyOwner {
         pause();
         IRewardsGauge(rewardsGauge).withdraw(balanceOfPool());
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.panic");
     }
 
     function pause() public onlyOwner {
         _pause();
 
         _removeAllowances();
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.pause");
     }
 
     function unpause() external onlyOwner {
@@ -259,6 +272,8 @@ contract StrategyCurveLP is StratManager, FeeManager, SlippageManager, Reentranc
         _giveAllowances();
 
         deposit();
+
+        emit OwnerOperation(msg.sender, "StrategyCurveLP.unpause");
     }
 
     function coins(uint256 _index) external view returns (address){

@@ -20,6 +20,7 @@ contract StratManager is Ownable, Pausable {
     address public companyFeeRecipient;
 
     event StratUpdate(address indexed updater, string updateType, address newValue);
+    event OwnerOperation(address indexed invoker, string method);
 
     /**
      * @dev Initializes the base strategy.
@@ -45,11 +46,11 @@ contract StratManager is Ownable, Pausable {
      * @dev Updates address where strategist fee earnings will go.
      * @param _strategist new strategist address.
      */
-    function setStrategist(address _strategist) external {
-        require(msg.sender == strategist, "!strategist");
+    function setStrategist(address _strategist) external onlyOwner {
         strategist = _strategist;
 
         emit StratUpdate(msg.sender, "Strategist", _strategist);
+        emit OwnerOperation(msg.sender, "StratManager.setStrategist");
     }
 
     /**
@@ -60,6 +61,7 @@ contract StratManager is Ownable, Pausable {
         unirouter = _unirouter;
 
         emit StratUpdate(msg.sender, "Inirouter", _unirouter);
+        emit OwnerOperation(msg.sender, "StratManager.setUnirouter");
     }
 
     /**
@@ -70,6 +72,7 @@ contract StratManager is Ownable, Pausable {
         companyFeeRecipient = _companyFeeRecipient;
 
         emit StratUpdate(msg.sender, "CompanyFeeRecipient", _companyFeeRecipient);
+        emit OwnerOperation(msg.sender, "StratManager.setCompanyFeeRecipient");
     }
 
     /**

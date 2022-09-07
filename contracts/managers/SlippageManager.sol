@@ -12,6 +12,7 @@ abstract contract SlippageManager is Ownable {
     uint[2] slippage;
 
     event SlippageUpdate(address indexed updater, uint slippageNumerator);
+    event OwnerOperation(address indexed invoker, string method);
 
     constructor() public {
         slippage = [DEFAULT_SLIPPAGE_NUMERATOR, DEFAULT_SLIPPAGE_DENOMINATOR];
@@ -22,5 +23,6 @@ abstract contract SlippageManager is Ownable {
         slippage[0] = _slippageNumerator;
 
         emit SlippageUpdate(msg.sender, _slippageNumerator);
+        emit OwnerOperation(msg.sender, "SlippageManager.setSlippage");
     }
 }

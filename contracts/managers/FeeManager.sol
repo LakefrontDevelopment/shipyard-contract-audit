@@ -19,6 +19,7 @@ abstract contract FeeManager is StratManager {
     uint public withdrawalFee = 5;
 
     event FeeUpdate(address indexed updater, string updateType, uint256 newValue);
+    event OwnerOperation(address indexed invoker, string method);
 
     function setHarvestCallFee(uint256 _fee) external onlyOwner {
         require(_fee <= MAX_HARVEST_CALL_FEE, "!cap");
@@ -26,6 +27,7 @@ abstract contract FeeManager is StratManager {
         harvestCallFee = _fee;
 
         emit FeeUpdate(msg.sender, "HarvestCallFee", _fee);
+        emit OwnerOperation(msg.sender, "FeeManager.setHarvestCallFee");
     }
 
     function setPerformanceFee(uint256 _fee) external onlyOwner {
@@ -34,6 +36,7 @@ abstract contract FeeManager is StratManager {
         performanceFee = _fee;
 
         emit FeeUpdate(msg.sender, "PerformanceFee", _fee);
+        emit OwnerOperation(msg.sender, "FeeManager.setPerformanceFee");
     }
 
     function setStrategistFee(uint256 _fee) external onlyOwner {
@@ -42,6 +45,7 @@ abstract contract FeeManager is StratManager {
         strategistFee = _fee;
 
         emit FeeUpdate(msg.sender, "StrategistFee", _fee);
+        emit OwnerOperation(msg.sender, "FeeManager.setStrategistFee");
     }
 
     function setWithdrawalFee(uint256 _fee) public onlyOwner {
@@ -50,5 +54,6 @@ abstract contract FeeManager is StratManager {
         withdrawalFee = _fee;
 
         emit FeeUpdate(msg.sender, "WithdrawFee", _fee);
+        emit OwnerOperation(msg.sender, "FeeManager.setWithdrawalFee");
     }
 }
